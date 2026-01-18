@@ -1345,7 +1345,7 @@ class MEXCFullScreener:
                 errors[0] += 1
                 return None
         
-        with ThreadPoolExecutor(max_workers=50) as ex:
+        with ThreadPoolExecutor(max_workers=15) as ex:
             for result in ex.map(analyze, all_symbols):
                 if result:
                     for signal in result:
@@ -2353,4 +2353,5 @@ print("🤖 Telegram Bot started in background thread")
 if __name__ == "__main__":
     # Локальный запуск
     print("🚀 Starting local server...")
+
     run_flask()
