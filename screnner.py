@@ -166,6 +166,8 @@ class MEXCFullScreener:
         self.daily_signal_count = {}
         
         self.settings_manager = settings_manager
+                # Загружаем алерты после полной инициализации объекта
+        self._load_price_alerts()
         self.running = False
         
         self.headers = {
@@ -189,7 +191,6 @@ class MEXCFullScreener:
         }
         
         self.load_user_settings()
-        self._load_price_alerts()
     
     def load_user_settings(self):
         settings = self.settings_manager.get_all_settings(self.chat_id)
@@ -247,382 +248,6 @@ class MEXCFullScreener:
             return "закрыта"
         m, s = int(seconds // 60), int(seconds % 60)
         return f"{m}м {s}с" if m > 0 else f"{s}с"
-    
-# ═══════════════════════════════════════════════════════════════
-# SUBSCRIPTION MANAGER
-# ═══════════════════════════════════════════════════════════════
-
-class SubscriptionManager:
-    """Менеджер подписок с проверкой оплаты через блокчейн"""
-    
-    def __init__(self):
-        self.config = self._load_config()
-        self.subscriptions = self._load_subscriptions()
-        self.used_transactions = self._load_used_transactions()
-        self.pending_payments = {}  # chat_id -> {plan, network, amount, created_at}
-        self.lock = threading.Lock()
-    
-    def _load_config(self):
-        """Загрузка конфигурации"""
-        try:
-            if os.path.exists(SUBSCRIPTION_CONFIG_FILE):
-                with open(SUBSCRIPTION_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                    print(f"✅ Subscription config loaded")
-                    return config
-        except Exception as e:
-            print(f"❌ Error loading subscription config: {e}")
-        
-        # Дефолтный конфиг
-        return {
-            "admin_ids": [7167732063],
-            "wallets": {
-                "TRC20": "TUuW5YBWKdhBvq7PD2rgFDDA79efmnu2L7",
-                "BEP20": "0x9dc57bd0550d2e32a60b8462789b9b7aedd267b4"
-            },
-            "api_keys": {
-                "bscscan": "AI752D1YTPV4NXCMUE1S2DPKP5IG1WRIE6"
-            },
-            "prices_usdt": {
-                "1_month": 10,
-                "3_months": 25,
-                "6_months": 45,
-                "1_year": 80
-            },
-            "plan_names": {
-                "1_month": "1 месяц",
-                "3_months": "3 месяца",
-                "6_months": "6 месяцев",
-                "1_year": "1 год"
-            },
-            "plan_days": {
-                "1_month": 30,
-                "3_months": 90,
-                "6_months": 180,
-                "1_year": 365
-            }
-        }
-    
-    def _load_subscriptions(self):
-        """Загрузка подписок пользователей"""
-        try:
-            if os.path.exists(SUBSCRIPTIONS_FILE):
-                with open(SUBSCRIPTIONS_FILE, 'r', encoding='utf-8') as f:
-                    content = f.read().strip()
-                    if content:
-                        subs = json.load(f) if not content else json.loads(content)
-                        print(f"✅ Subscriptions loaded: {len(subs)} users")
-                        return subs
-        except Exception as e:
-            print(f"❌ Error loading subscriptions: {e}")
-        return {}
-    
-    def _save_subscriptions(self):
-        """Сохранение подписок"""
-        with self.lock:
-            try:
-                with open(SUBSCRIPTIONS_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(self.subscriptions, f, ensure_ascii=False, indent=2)
-            except Exception as e:
-                print(f"❌ Error saving subscriptions: {e}")
-    
-    def _load_used_transactions(self):
-        """Загрузка использованных транзакций"""
-        try:
-            if os.path.exists(USED_TRANSACTIONS_FILE):
-                with open(USED_TRANSACTIONS_FILE, 'r', encoding='utf-8') as f:
-                    content = f.read().strip()
-                    if content:
-                        return json.loads(content)
-        except Exception as e:
-            print(f"❌ Error loading used transactions: {e}")
-        return []
-    
-    def _save_used_transactions(self):
-        """Сохранение использованных транзакций"""
-        with self.lock:
-            try:
-                with open(USED_TRANSACTIONS_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(self.used_transactions, f, ensure_ascii=False, indent=2)
-            except Exception as e:
-                print(f"❌ Error saving used transactions: {e}")
-    
-    def is_admin(self, chat_id):
-        """Проверка, является ли пользователь админом"""
-        return chat_id in self.config.get('admin_ids', [])
-    
-    def has_subscription(self, chat_id):
-        """Проверка наличия активной подписки"""
-        # Админы всегда имеют доступ
-        if self.is_admin(chat_id):
-            return True
-        
-        chat_id_str = str(chat_id)
-        if chat_id_str not in self.subscriptions:
-            return False
-        
-        sub = self.subscriptions[chat_id_str]
-        expires_at = sub.get('expires_at', 0)
-        
-        return time.time() < expires_at
-    
-    def get_subscription_info(self, chat_id):
-        """Получение информации о подписке"""
-        if self.is_admin(chat_id):
-            return {
-                'active': True,
-                'is_admin': True,
-                'expires_at': None,
-                'plan': 'admin'
-            }
-        
-        chat_id_str = str(chat_id)
-        if chat_id_str not in self.subscriptions:
-            return {'active': False}
-        
-        sub = self.subscriptions[chat_id_str]
-        expires_at = sub.get('expires_at', 0)
-        active = time.time() < expires_at
-        
-        return {
-            'active': active,
-            'is_admin': False,
-            'expires_at': expires_at,
-            'plan': sub.get('plan', ''),
-            'activated_at': sub.get('activated_at', 0)
-        }
-    
-    def activate_subscription(self, chat_id, plan):
-        """Активация подписки"""
-        chat_id_str = str(chat_id)
-        days = self.config['plan_days'].get(plan, 30)
-        
-        current_time = time.time()
-        
-        # Если уже есть активная подписка — продлеваем
-        if chat_id_str in self.subscriptions:
-            old_expires = self.subscriptions[chat_id_str].get('expires_at', 0)
-            if old_expires > current_time:
-                # Продление от текущей даты окончания
-                new_expires = old_expires + (days * 86400)
-            else:
-                # Новая подписка от текущего момента
-                new_expires = current_time + (days * 86400)
-        else:
-            new_expires = current_time + (days * 86400)
-        
-        self.subscriptions[chat_id_str] = {
-            'plan': plan,
-            'activated_at': current_time,
-            'expires_at': new_expires
-        }
-        
-        self._save_subscriptions()
-        return new_expires
-    
-    def get_prices(self):
-        """Получение цен"""
-        return self.config.get('prices_usdt', {})
-    
-    def get_plan_name(self, plan):
-        """Получение названия плана"""
-        return self.config.get('plan_names', {}).get(plan, plan)
-    
-    def get_wallet(self, network):
-        """Получение адреса кошелька"""
-        return self.config.get('wallets', {}).get(network, '')
-    
-    def set_pending_payment(self, chat_id, plan, network):
-        """Установка ожидающего платежа"""
-        amount = self.config['prices_usdt'].get(plan, 0)
-        self.pending_payments[chat_id] = {
-            'plan': plan,
-            'network': network,
-            'amount': amount,
-            'created_at': time.time()
-        }
-    
-    def get_pending_payment(self, chat_id):
-        """Получение ожидающего платежа"""
-        return self.pending_payments.get(chat_id)
-    
-    def clear_pending_payment(self, chat_id):
-        """Очистка ожидающего платежа"""
-        if chat_id in self.pending_payments:
-            del self.pending_payments[chat_id]
-    
-    def is_transaction_used(self, tx_hash):
-        """Проверка, была ли транзакция уже использована"""
-        return tx_hash.lower() in [t.lower() for t in self.used_transactions]
-    
-    def mark_transaction_used(self, tx_hash):
-        """Отметить транзакцию как использованную"""
-        self.used_transactions.append(tx_hash.lower())
-        self._save_used_transactions()
-    
-    def verify_transaction_trc20(self, tx_hash, expected_amount):
-        """Проверка TRC20 транзакции через Tronscan API"""
-        try:
-            # Приводим к нижнему регистру для сравнения
-            my_wallet = self.get_wallet('TRC20').lower()
-            
-            # Tronscan API
-            url = f"https://apilist.tronscanapi.com/api/transaction-info?hash={tx_hash}"
-            
-            response = requests.get(url, timeout=15)
-            if response.status_code != 200:
-                return False, "Ошибка API Tronscan"
-            
-            data = response.json()
-            
-            if not data or 'contractData' not in data:
-                return False, "Транзакция не найдена"
-            
-            # Проверяем статус
-            if not data.get('confirmed', False):
-                return False, "Транзакция ещё не подтверждена. Подождите 1-2 минуты."
-            
-            # Проверяем что это TRC20 transfer
-            contract_data = data.get('contractData', {})
-            
-            # Получатель
-            to_address = contract_data.get('to_address', '').lower()
-            if to_address != my_wallet:
-                return False, "Неверный адрес получателя"
-            
-            # Сумма (в USDT 6 decimals)
-            amount = float(contract_data.get('amount', 0)) / 1_000_000
-            
-            # Проверяем сумму с небольшой погрешностью (0.01 USDT)
-            if abs(amount - expected_amount) > 0.01:
-                return False, f"Неверная сумма: {amount} USDT (ожидалось {expected_amount} USDT)"
-            
-            # Проверяем что это USDT
-            token_name = data.get('tokenTransferInfo', {}).get('symbol', '')
-            if token_name.upper() not in ['USDT', 'TETHER']:
-                # Альтернативная проверка
-                contract_address = contract_data.get('contract_address', '')
-                usdt_contract = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'.lower()
-                if contract_address.lower() != usdt_contract:
-                    return False, "Это не USDT транзакция"
-            
-            return True, "OK"
-            
-        except Exception as e:
-            print(f"TRC20 verification error: {e}")
-            return False, f"Ошибка проверки: {str(e)}"
-    
-    def verify_transaction_bep20(self, tx_hash, expected_amount):
-        """Проверка BEP20 транзакции через BSCScan API"""
-        try:
-            my_wallet = self.get_wallet('BEP20').lower()
-            api_key = self.config.get('api_keys', {}).get('bscscan', '')
-            
-            # Убираем 0x если есть для чистоты
-            if not tx_hash.startswith('0x'):
-                tx_hash = '0x' + tx_hash
-            
-            # BSCScan API - получаем информацию о транзакции
-            url = f"https://api.bscscan.com/api?module=proxy&action=eth_getTransactionReceipt&txhash={tx_hash}&apikey={api_key}"
-            
-            response = requests.get(url, timeout=15)
-            if response.status_code != 200:
-                return False, "Ошибка API BSCScan"
-            
-            data = response.json()
-            
-            if data.get('error') or not data.get('result'):
-                return False, "Транзакция не найдена"
-            
-            result = data['result']
-            
-            # Проверяем статус транзакции
-            if result.get('status') != '0x1':
-                return False, "Транзакция не подтверждена или неуспешна"
-            
-            # Ищем Transfer event в logs
-            logs = result.get('logs', [])
-            
-            usdt_contract = '0x55d398326f99059ff775485246999027b3197955'.lower()  # BSC USDT
-            transfer_topic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'  # Transfer event
-            
-            for log in logs:
-                # Проверяем что это USDT контракт
-                if log.get('address', '').lower() != usdt_contract:
-                    continue
-                
-                topics = log.get('topics', [])
-                if len(topics) < 3:
-                    continue
-                
-                # Первый topic - это событие Transfer
-                if topics[0].lower() != transfer_topic:
-                    continue
-                
-                # Третий topic (index 2) - это адрес получателя (с padding)
-                to_address = '0x' + topics[2][-40:].lower()
-                
-                if to_address != my_wallet:
-                    continue
-                
-                # Сумма в data (18 decimals для BSC USDT)
-                amount_hex = log.get('data', '0x0')
-                amount_wei = int(amount_hex, 16)
-                amount = amount_wei / 1e18
-                
-                # Проверяем сумму
-                if abs(amount - expected_amount) > 0.01:
-                    return False, f"Неверная сумма: {amount:.2f} USDT (ожидалось {expected_amount} USDT)"
-                
-                return True, "OK"
-            
-            return False, "USDT перевод на ваш кошелёк не найден в транзакции"
-            
-        except Exception as e:
-            print(f"BEP20 verification error: {e}")
-            return False, f"Ошибка проверки: {str(e)}"
-    
-    def verify_payment(self, chat_id, tx_hash):
-        """Проверка платежа по TX Hash"""
-        pending = self.get_pending_payment(chat_id)
-        if not pending:
-            return False, "Нет ожидающего платежа"
-        
-        # Проверяем что транзакция не использовалась
-        if self.is_transaction_used(tx_hash):
-            return False, "Эта транзакция уже была использована"
-        
-        network = pending['network']
-        amount = pending['amount']
-        
-        # Проверяем в соответствующем блокчейне
-        if network == 'TRC20':
-            success, message = self.verify_transaction_trc20(tx_hash, amount)
-        elif network == 'BEP20':
-            success, message = self.verify_transaction_bep20(tx_hash, amount)
-        else:
-            return False, "Неизвестная сеть"
-        
-        if success:
-            # Отмечаем транзакцию как использованную
-            self.mark_transaction_used(tx_hash)
-            
-            # Активируем подписку
-            plan = pending['plan']
-            expires_at = self.activate_subscription(chat_id, plan)
-            
-            # Очищаем pending
-            self.clear_pending_payment(chat_id)
-            
-            return True, expires_at
-        
-        return False, message
-    
-    def format_expires_date(self, timestamp):
-        """Форматирование даты окончания"""
-        if timestamp is None:
-            return "∞ Навсегда"
-        return datetime.fromtimestamp(timestamp).strftime('%d.%m.%Y %H:%M')
     
     def get_days_remaining(self, expires_at):
         """Получение оставшихся дней"""
@@ -959,7 +584,6 @@ class SubscriptionManager:
                         data = json.loads(content)
                         if str(self.chat_id) in data:
                             self.price_alerts[self.chat_id] = data[str(self.chat_id)]
-                        print(f"✅ Загружено алертов для {self.chat_id}: {len(self.price_alerts.get(self.chat_id, []))}")
         except Exception as e:
             print(f"❌ Ошибка загрузки алертов: {e}")
     
@@ -1803,6 +1427,382 @@ class SubscriptionManager:
             ct = time.time()
             self.sent_alerts = {k: v for k, v in self.sent_alerts.items() if isinstance(v, tuple) and (ct - v[0]) < 3600}
     
+# ═══════════════════════════════════════════════════════════════
+# SUBSCRIPTION MANAGER
+# ═══════════════════════════════════════════════════════════════
+
+class SubscriptionManager:
+    """Менеджер подписок с проверкой оплаты через блокчейн"""
+    
+    def __init__(self):
+        self.config = self._load_config()
+        self.subscriptions = self._load_subscriptions()
+        self.used_transactions = self._load_used_transactions()
+        self.pending_payments = {}  # chat_id -> {plan, network, amount, created_at}
+        self.lock = threading.Lock()
+    
+    def _load_config(self):
+        """Загрузка конфигурации"""
+        try:
+            if os.path.exists(SUBSCRIPTION_CONFIG_FILE):
+                with open(SUBSCRIPTION_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    print(f"✅ Subscription config loaded")
+                    return config
+        except Exception as e:
+            print(f"❌ Error loading subscription config: {e}")
+        
+        # Дефолтный конфиг
+        return {
+            "admin_ids": [7167732063],
+            "wallets": {
+                "TRC20": "TUuW5YBWKdhBvq7PD2rgFDDA79efmnu2L7",
+                "BEP20": "0x9dc57bd0550d2e32a60b8462789b9b7aedd267b4"
+            },
+            "api_keys": {
+                "bscscan": "AI752D1YTPV4NXCMUE1S2DPKP5IG1WRIE6"
+            },
+            "prices_usdt": {
+                "1_month": 10,
+                "3_months": 25,
+                "6_months": 45,
+                "1_year": 80
+            },
+            "plan_names": {
+                "1_month": "1 месяц",
+                "3_months": "3 месяца",
+                "6_months": "6 месяцев",
+                "1_year": "1 год"
+            },
+            "plan_days": {
+                "1_month": 30,
+                "3_months": 90,
+                "6_months": 180,
+                "1_year": 365
+            }
+        }
+    
+    def _load_subscriptions(self):
+        """Загрузка подписок пользователей"""
+        try:
+            if os.path.exists(SUBSCRIPTIONS_FILE):
+                with open(SUBSCRIPTIONS_FILE, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content:
+                        subs = json.load(f) if not content else json.loads(content)
+                        print(f"✅ Subscriptions loaded: {len(subs)} users")
+                        return subs
+        except Exception as e:
+            print(f"❌ Error loading subscriptions: {e}")
+        return {}
+    
+    def _save_subscriptions(self):
+        """Сохранение подписок"""
+        with self.lock:
+            try:
+                with open(SUBSCRIPTIONS_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(self.subscriptions, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"❌ Error saving subscriptions: {e}")
+    
+    def _load_used_transactions(self):
+        """Загрузка использованных транзакций"""
+        try:
+            if os.path.exists(USED_TRANSACTIONS_FILE):
+                with open(USED_TRANSACTIONS_FILE, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content:
+                        return json.loads(content)
+        except Exception as e:
+            print(f"❌ Error loading used transactions: {e}")
+        return []
+    
+    def _save_used_transactions(self):
+        """Сохранение использованных транзакций"""
+        with self.lock:
+            try:
+                with open(USED_TRANSACTIONS_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(self.used_transactions, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"❌ Error saving used transactions: {e}")
+    
+    def is_admin(self, chat_id):
+        """Проверка, является ли пользователь админом"""
+        return chat_id in self.config.get('admin_ids', [])
+    
+    def has_subscription(self, chat_id):
+        """Проверка наличия активной подписки"""
+        # Админы всегда имеют доступ
+        if self.is_admin(chat_id):
+            return True
+        
+        chat_id_str = str(chat_id)
+        if chat_id_str not in self.subscriptions:
+            return False
+        
+        sub = self.subscriptions[chat_id_str]
+        expires_at = sub.get('expires_at', 0)
+        
+        return time.time() < expires_at
+    
+    def get_subscription_info(self, chat_id):
+        """Получение информации о подписке"""
+        if self.is_admin(chat_id):
+            return {
+                'active': True,
+                'is_admin': True,
+                'expires_at': None,
+                'plan': 'admin'
+            }
+        
+        chat_id_str = str(chat_id)
+        if chat_id_str not in self.subscriptions:
+            return {'active': False}
+        
+        sub = self.subscriptions[chat_id_str]
+        expires_at = sub.get('expires_at', 0)
+        active = time.time() < expires_at
+        
+        return {
+            'active': active,
+            'is_admin': False,
+            'expires_at': expires_at,
+            'plan': sub.get('plan', ''),
+            'activated_at': sub.get('activated_at', 0)
+        }
+    
+    def activate_subscription(self, chat_id, plan):
+        """Активация подписки"""
+        chat_id_str = str(chat_id)
+        days = self.config['plan_days'].get(plan, 30)
+        
+        current_time = time.time()
+        
+        # Если уже есть активная подписка — продлеваем
+        if chat_id_str in self.subscriptions:
+            old_expires = self.subscriptions[chat_id_str].get('expires_at', 0)
+            if old_expires > current_time:
+                # Продление от текущей даты окончания
+                new_expires = old_expires + (days * 86400)
+            else:
+                # Новая подписка от текущего момента
+                new_expires = current_time + (days * 86400)
+        else:
+            new_expires = current_time + (days * 86400)
+        
+        self.subscriptions[chat_id_str] = {
+            'plan': plan,
+            'activated_at': current_time,
+            'expires_at': new_expires
+        }
+        
+        self._save_subscriptions()
+        return new_expires
+    
+    def get_prices(self):
+        """Получение цен"""
+        return self.config.get('prices_usdt', {})
+    
+    def get_plan_name(self, plan):
+        """Получение названия плана"""
+        return self.config.get('plan_names', {}).get(plan, plan)
+    
+    def get_wallet(self, network):
+        """Получение адреса кошелька"""
+        return self.config.get('wallets', {}).get(network, '')
+    
+    def set_pending_payment(self, chat_id, plan, network):
+        """Установка ожидающего платежа"""
+        amount = self.config['prices_usdt'].get(plan, 0)
+        self.pending_payments[chat_id] = {
+            'plan': plan,
+            'network': network,
+            'amount': amount,
+            'created_at': time.time()
+        }
+    
+    def get_pending_payment(self, chat_id):
+        """Получение ожидающего платежа"""
+        return self.pending_payments.get(chat_id)
+    
+    def clear_pending_payment(self, chat_id):
+        """Очистка ожидающего платежа"""
+        if chat_id in self.pending_payments:
+            del self.pending_payments[chat_id]
+    
+    def is_transaction_used(self, tx_hash):
+        """Проверка, была ли транзакция уже использована"""
+        return tx_hash.lower() in [t.lower() for t in self.used_transactions]
+    
+    def mark_transaction_used(self, tx_hash):
+        """Отметить транзакцию как использованную"""
+        self.used_transactions.append(tx_hash.lower())
+        self._save_used_transactions()
+    
+    def verify_transaction_trc20(self, tx_hash, expected_amount):
+        """Проверка TRC20 транзакции через Tronscan API"""
+        try:
+            # Приводим к нижнему регистру для сравнения
+            my_wallet = self.get_wallet('TRC20').lower()
+            
+            # Tronscan API
+            url = f"https://apilist.tronscanapi.com/api/transaction-info?hash={tx_hash}"
+            
+            response = requests.get(url, timeout=15)
+            if response.status_code != 200:
+                return False, "Ошибка API Tronscan"
+            
+            data = response.json()
+            
+            if not data or 'contractData' not in data:
+                return False, "Транзакция не найдена"
+            
+            # Проверяем статус
+            if not data.get('confirmed', False):
+                return False, "Транзакция ещё не подтверждена. Подождите 1-2 минуты."
+            
+            # Проверяем что это TRC20 transfer
+            contract_data = data.get('contractData', {})
+            
+            # Получатель
+            to_address = contract_data.get('to_address', '').lower()
+            if to_address != my_wallet:
+                return False, "Неверный адрес получателя"
+            
+            # Сумма (в USDT 6 decimals)
+            amount = float(contract_data.get('amount', 0)) / 1_000_000
+            
+            # Проверяем сумму с небольшой погрешностью (0.01 USDT)
+            if abs(amount - expected_amount) > 0.01:
+                return False, f"Неверная сумма: {amount} USDT (ожидалось {expected_amount} USDT)"
+            
+            # Проверяем что это USDT
+            token_name = data.get('tokenTransferInfo', {}).get('symbol', '')
+            if token_name.upper() not in ['USDT', 'TETHER']:
+                # Альтернативная проверка
+                contract_address = contract_data.get('contract_address', '')
+                usdt_contract = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'.lower()
+                if contract_address.lower() != usdt_contract:
+                    return False, "Это не USDT транзакция"
+            
+            return True, "OK"
+            
+        except Exception as e:
+            print(f"TRC20 verification error: {e}")
+            return False, f"Ошибка проверки: {str(e)}"
+    
+    def verify_transaction_bep20(self, tx_hash, expected_amount):
+        """Проверка BEP20 транзакции через BSCScan API"""
+        try:
+            my_wallet = self.get_wallet('BEP20').lower()
+            api_key = self.config.get('api_keys', {}).get('bscscan', '')
+            
+            # Убираем 0x если есть для чистоты
+            if not tx_hash.startswith('0x'):
+                tx_hash = '0x' + tx_hash
+            
+            # BSCScan API - получаем информацию о транзакции
+            url = f"https://api.bscscan.com/api?module=proxy&action=eth_getTransactionReceipt&txhash={tx_hash}&apikey={api_key}"
+            
+            response = requests.get(url, timeout=15)
+            if response.status_code != 200:
+                return False, "Ошибка API BSCScan"
+            
+            data = response.json()
+            
+            if data.get('error') or not data.get('result'):
+                return False, "Транзакция не найдена"
+            
+            result = data['result']
+            
+            # Проверяем статус транзакции
+            if result.get('status') != '0x1':
+                return False, "Транзакция не подтверждена или неуспешна"
+            
+            # Ищем Transfer event в logs
+            logs = result.get('logs', [])
+            
+            usdt_contract = '0x55d398326f99059ff775485246999027b3197955'.lower()  # BSC USDT
+            transfer_topic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'  # Transfer event
+            
+            for log in logs:
+                # Проверяем что это USDT контракт
+                if log.get('address', '').lower() != usdt_contract:
+                    continue
+                
+                topics = log.get('topics', [])
+                if len(topics) < 3:
+                    continue
+                
+                # Первый topic - это событие Transfer
+                if topics[0].lower() != transfer_topic:
+                    continue
+                
+                # Третий topic (index 2) - это адрес получателя (с padding)
+                to_address = '0x' + topics[2][-40:].lower()
+                
+                if to_address != my_wallet:
+                    continue
+                
+                # Сумма в data (18 decimals для BSC USDT)
+                amount_hex = log.get('data', '0x0')
+                amount_wei = int(amount_hex, 16)
+                amount = amount_wei / 1e18
+                
+                # Проверяем сумму
+                if abs(amount - expected_amount) > 0.01:
+                    return False, f"Неверная сумма: {amount:.2f} USDT (ожидалось {expected_amount} USDT)"
+                
+                return True, "OK"
+            
+            return False, "USDT перевод на ваш кошелёк не найден в транзакции"
+            
+        except Exception as e:
+            print(f"BEP20 verification error: {e}")
+            return False, f"Ошибка проверки: {str(e)}"
+    
+    def verify_payment(self, chat_id, tx_hash):
+        """Проверка платежа по TX Hash"""
+        pending = self.get_pending_payment(chat_id)
+        if not pending:
+            return False, "Нет ожидающего платежа"
+        
+        # Проверяем что транзакция не использовалась
+        if self.is_transaction_used(tx_hash):
+            return False, "Эта транзакция уже была использована"
+        
+        network = pending['network']
+        amount = pending['amount']
+        
+        # Проверяем в соответствующем блокчейне
+        if network == 'TRC20':
+            success, message = self.verify_transaction_trc20(tx_hash, amount)
+        elif network == 'BEP20':
+            success, message = self.verify_transaction_bep20(tx_hash, amount)
+        else:
+            return False, "Неизвестная сеть"
+        
+        if success:
+            # Отмечаем транзакцию как использованную
+            self.mark_transaction_used(tx_hash)
+            
+            # Активируем подписку
+            plan = pending['plan']
+            expires_at = self.activate_subscription(chat_id, plan)
+            
+            # Очищаем pending
+            self.clear_pending_payment(chat_id)
+            
+            return True, expires_at
+        
+        return False, message
+    
+    def format_expires_date(self, timestamp):
+        """Форматирование даты окончания"""
+        if timestamp is None:
+            return "∞ Навсегда"
+        return datetime.fromtimestamp(timestamp).strftime('%d.%m.%Y %H:%M')
+
 class TelegramBot:
     def __init__(self):
         self.token = TELEGRAM_BOT_TOKEN
@@ -2033,8 +2033,8 @@ class TelegramBot:
     def get_payment_retry_keyboard(self):
         return {"keyboard": [
             [{"text": "🔄 Попробовать снова"}],
-            [{"text": "💬 Написать админу"}],
-            [{"text": "🔙 Назад"}]
+            [{"text": "❌ Отменить"}],
+            [{"text": "💬 Написать админу"}]
         ], "resize_keyboard": True}
     
     def get_no_subscription_keyboard(self):
@@ -2250,10 +2250,18 @@ class TelegramBot:
             inp = self.waiting_for_input.pop(chat_id)
             
             if inp == 'enter_tx_hash':
+                # Проверяем, не нажата ли кнопка отмены
+                if text == "❌ Отменить":
+                    self.subscription_manager.clear_pending_payment(chat_id)
+                    if chat_id in self.waiting_for_input:
+                        del self.waiting_for_input[chat_id]
+                    self.send_message(chat_id, "❌ Оплата отменена", self.get_subscription_keyboard())
+                    return
+                
                 tx_hash = text.strip()
                 if len(tx_hash) < 20:
                     self.waiting_for_input[chat_id] = 'enter_tx_hash'
-                    self.send_message(chat_id, "❌ Слишком короткий TX Hash. Попробуйте ещё раз:")
+                    self.send_message(chat_id, "❌ Слишком короткий TX Hash. Попробуйте ещё раз:", self.get_payment_retry_keyboard())
                     return
                 
                 self.send_message(chat_id, "⏳ Проверяю транзакцию...")
@@ -2311,9 +2319,49 @@ class TelegramBot:
                     self.send_message(chat_id, msg, self.get_payment_retry_keyboard())
                 return
             
-            elif inp == 'select_network' or inp == 'waiting_payment':
-                # Игнорируем неожиданный ввод в этих состояниях
+            elif inp == 'select_network':
+                if text == "❌ Отменить":
+                    if chat_id in self.subscription_manager.pending_payments:
+                        del self.subscription_manager.pending_payments[chat_id]
+                    if chat_id in self.waiting_for_input:
+                        del self.waiting_for_input[chat_id]
+                    self.send_message(chat_id, "❌ Оплата отменена", self.get_subscription_keyboard())
+                    return
+                # Игнорируем другой ввод
                 return
+            
+            elif inp == 'waiting_payment':
+                if text == "❌ Отменить":
+                    self.subscription_manager.clear_pending_payment(chat_id)
+                    self.send_message(chat_id, "❌ Оплата отменена", self.get_subscription_keyboard())
+                    return
+                elif text == "✅ Я оплатил":
+                    pending = self.subscription_manager.get_pending_payment(chat_id)
+                    if pending:
+                        self.waiting_for_input[chat_id] = 'enter_tx_hash'
+                        msg = """🔍 ПРОВЕРКА ОПЛАТЫ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📝 Введите TX Hash транзакции:
+
+Это длинный код из вашего кошелька,
+который появился после отправки.
+
+Пример TRC20:
+7f3a8b2c1d4e5f6a7b8c9d0e...
+
+Пример BEP20:
+0x7f3a8b2c1d4e5f6a7b8c9d0e...
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+                        self.send_message(chat_id, msg, self.get_payment_keyboard())
+                    else:
+                        self.send_message(chat_id, "❌ Нет ожидающего платежа", self.get_subscription_keyboard())
+                    return
+                else:
+                    # Для любого другого текста - игнорируем
+                    self.waiting_for_input[chat_id] = inp
+                    return
             
             elif inp == 'percent':
                 try:
@@ -2471,8 +2519,34 @@ class TelegramBot:
             self.send_message(chat_id, "✅ 📉 ТОП ПАДЕНИЯ\n\nВыберите период:", self.get_top_period_keyboard())
         
         elif text == "🔙 Назад":
-            self.top_mode[chat_id] = None
-            self.send_message(chat_id, "🔥 Выберите тип:", self.get_top_mode_keyboard())
+            # Определяем контекст - откуда пользователь нажал "Назад"
+            if chat_id in self.waiting_for_input:
+                inp = self.waiting_for_input[chat_id]
+                if inp == 'select_network':
+                    # Возвращаемся к выбору плана
+                    prices = self.subscription_manager.get_prices()
+                    msg = f"""💳 ПОКУПКА ПОДПИСКИ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Выберите срок подписки:
+
+📅 1 месяц — ${prices.get('1_month', 10)} USDT
+📅 3 месяца — ${prices.get('3_months', 25)} USDT (экономия 17%)
+📅 6 месяцев — ${prices.get('6_months', 45)} USDT (экономия 25%)  
+📅 1 год — ${prices.get('1_year', 80)} USDT (экономия 33%)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+                    self.send_message(chat_id, msg, self.get_plan_keyboard())
+                    return
+            
+            # Если не в процессе покупки подписки - проверяем контекст Top
+            if chat_id in self.top_mode and self.top_mode[chat_id] is not None:
+                self.top_mode[chat_id] = None
+                self.send_message(chat_id, "🔥 Выберите тип:", self.get_top_mode_keyboard())
+                return
+            
+            # Во всех остальных случаях - главное меню
+            self.send_message(chat_id, "🏠 Главное меню", self.get_main_keyboard())
         
         elif text.startswith("⏱ ") and text[2:] in ["1m", "5m", "15m", "30m", "1h", "4h", "24h"]:
             if self.top_mode.get(chat_id):
@@ -2495,7 +2569,7 @@ class TelegramBot:
                 del self.alert_creation_state[chat_id]
             self.send_message(chat_id, "🏠 Главное меню", self.get_main_keyboard())
 
-              # ═══════════════════════════════════════════════════════════════
+        # ═══════════════════════════════════════════════════════════════
         # SUBSCRIPTION HANDLERS
         # ═══════════════════════════════════════════════════════════════
         
@@ -2581,7 +2655,7 @@ class TelegramBot:
             self.send_message(chat_id, msg, self.get_plan_keyboard())
         
         elif text.startswith("📅 1 месяц"):
-            self.waiting_for_input[chat_id] = 'select_network'
+             
             self.subscription_manager.pending_payments[chat_id] = {'plan': '1_month'}
             prices = self.subscription_manager.get_prices()
             msg = f"""💳 ОПЛАТА: 1 МЕСЯЦ
@@ -2591,14 +2665,14 @@ class TelegramBot:
 
 Выберите сеть для оплаты:
 
-🔷 TRC20 (Tron) — комиссия ~1$
-🟡 BEP20 (BSC) — комиссия ~0.3$
+🔷 TRC20 (Tron)
+🟡 BEP20 (BSC)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
             self.send_message(chat_id, msg, self.get_network_keyboard())
         
         elif text.startswith("📅 3 месяца"):
-            self.waiting_for_input[chat_id] = 'select_network'
+             
             self.subscription_manager.pending_payments[chat_id] = {'plan': '3_months'}
             prices = self.subscription_manager.get_prices()
             msg = f"""💳 ОПЛАТА: 3 МЕСЯЦА
@@ -2608,14 +2682,14 @@ class TelegramBot:
 
 Выберите сеть для оплаты:
 
-🔷 TRC20 (Tron) — комиссия ~1$
-🟡 BEP20 (BSC) — комиссия ~0.3$
+🔷 TRC20 (Tron)
+🟡 BEP20 (BSC)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
             self.send_message(chat_id, msg, self.get_network_keyboard())
         
         elif text.startswith("📅 6 месяцев"):
-            self.waiting_for_input[chat_id] = 'select_network'
+             
             self.subscription_manager.pending_payments[chat_id] = {'plan': '6_months'}
             prices = self.subscription_manager.get_prices()
             msg = f"""💳 ОПЛАТА: 6 МЕСЯЦЕВ
@@ -2625,14 +2699,14 @@ class TelegramBot:
 
 Выберите сеть для оплаты:
 
-🔷 TRC20 (Tron) — комиссия ~1$
-🟡 BEP20 (BSC) — комиссия ~0.3$
+🔷 TRC20 (Tron)
+🟡 BEP20 (BSC)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
             self.send_message(chat_id, msg, self.get_network_keyboard())
         
         elif text.startswith("📅 1 год"):
-            self.waiting_for_input[chat_id] = 'select_network'
+             
             self.subscription_manager.pending_payments[chat_id] = {'plan': '1_year'}
             prices = self.subscription_manager.get_prices()
             msg = f"""💳 ОПЛАТА: 1 ГОД
@@ -2642,25 +2716,36 @@ class TelegramBot:
 
 Выберите сеть для оплаты:
 
-🔷 TRC20 (Tron) — комиссия ~1$
-🟡 BEP20 (BSC) — комиссия ~0.3$
+🔷 TRC20 (Tron)
+🟡 BEP20 (BSC)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
             self.send_message(chat_id, msg, self.get_network_keyboard())
         
         elif text == "🔷 TRC20 (Tron)":
-            if chat_id in self.subscription_manager.pending_payments:
-                pending = self.subscription_manager.pending_payments[chat_id]
-                plan = pending['plan']
-                prices = self.subscription_manager.get_prices()
-                amount = prices[plan]
-                wallet = self.subscription_manager.get_wallet('TRC20')
-                plan_name = self.subscription_manager.get_plan_name(plan)
-                
-                self.subscription_manager.set_pending_payment(chat_id, plan, 'TRC20')
-                self.waiting_for_input[chat_id] = 'waiting_payment'
-                
-                msg = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # Убедимся, что у нас есть данные о выбранном плане
+            if chat_id not in self.subscription_manager.pending_payments:
+                # Если данных нет, попробуем восстановить из waiting_for_input
+                if chat_id in self.waiting_for_input and self.waiting_for_input[chat_id] == 'select_network':
+                    # Получаем план из предыдущего состояния
+                    # Это может произойти при повторном нажатии
+                    pass
+                else:
+                    self.send_message(chat_id, "❌ Ошибка: сначала выберите тариф подписки", self.get_plan_keyboard())
+                    return
+            
+            pending = self.subscription_manager.pending_payments[chat_id]
+            plan = pending['plan']
+            prices = self.subscription_manager.get_prices()
+            amount = prices[plan]
+            wallet = self.subscription_manager.get_wallet('TRC20')
+            plan_name = self.subscription_manager.get_plan_name(plan)
+            
+            # Устанавливаем сеть и переходим к следующему шагу
+            self.subscription_manager.set_pending_payment(chat_id, plan, 'TRC20')
+            self.waiting_for_input[chat_id] = 'waiting_payment'
+            
+            msg = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━
 💳 ОПЛАТА ПОДПИСКИ
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -2672,9 +2757,7 @@ class TelegramBot:
 
 📬 Адрес для оплаты:
 
-`{wallet}`
-
-(нажмите чтобы скопировать)
+{wallet}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -2685,21 +2768,32 @@ class TelegramBot:
 • После оплаты нажмите "Я оплатил"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
-                self.send_message(chat_id, msg, self.get_payment_keyboard())
+            self.send_message(chat_id, msg, self.get_payment_keyboard())
         
         elif text == "🟡 BEP20 (BSC)":
-            if chat_id in self.subscription_manager.pending_payments:
-                pending = self.subscription_manager.pending_payments[chat_id]
-                plan = pending['plan']
-                prices = self.subscription_manager.get_prices()
-                amount = prices[plan]
-                wallet = self.subscription_manager.get_wallet('BEP20')
-                plan_name = self.subscription_manager.get_plan_name(plan)
-                
-                self.subscription_manager.set_pending_payment(chat_id, plan, 'BEP20')
-                self.waiting_for_input[chat_id] = 'waiting_payment'
-                
-                msg = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # Убедимся, что у нас есть данные о выбранном плане
+            if chat_id not in self.subscription_manager.pending_payments:
+                # Если данных нет, попробуем восстановить из waiting_for_input
+                if chat_id in self.waiting_for_input and self.waiting_for_input[chat_id] == 'select_network':
+                    # Получаем план из предыдущего состояния
+                    # Это может произойти при повторном нажатии
+                    pass
+                else:
+                    self.send_message(chat_id, "❌ Ошибка: сначала выберите тариф подписки", self.get_plan_keyboard())
+                    return
+            
+            pending = self.subscription_manager.pending_payments[chat_id]
+            plan = pending['plan']
+            prices = self.subscription_manager.get_prices()
+            amount = prices[plan]
+            wallet = self.subscription_manager.get_wallet('BEP20')
+            plan_name = self.subscription_manager.get_plan_name(plan)
+            
+            # Устанавливаем сеть и переходим к следующему шагу
+            self.subscription_manager.set_pending_payment(chat_id, plan, 'BEP20')
+            self.waiting_for_input[chat_id] = 'waiting_payment'
+            
+            msg = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━
 💳 ОПЛАТА ПОДПИСКИ
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -2711,9 +2805,7 @@ class TelegramBot:
 
 📬 Адрес для оплаты:
 
-`{wallet}`
-
-(нажмите чтобы скопировать)
+{wallet}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -2724,7 +2816,7 @@ class TelegramBot:
 • После оплаты нажмите "Я оплатил"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
-                self.send_message(chat_id, msg, self.get_payment_keyboard())
+            self.send_message(chat_id, msg, self.get_payment_keyboard())
         
         elif text == "✅ Я оплатил":
             pending = self.subscription_manager.get_pending_payment(chat_id)
@@ -3159,16 +3251,22 @@ class TelegramBot:
 # ═══════════════════════════════════════════════════════════════
 
 def start_bot():
-    """Запуск Telegram бота в отдельном потоке"""
+    """Запуск Telegram бота"""
+    time.sleep(2)  # Ждём запуска Flask
     bot = TelegramBot()
     bot.run()
 
-# Запускаем бота в фоновом потоке при импорте модуля
-bot_thread = threading.Thread(target=start_bot, daemon=True)
-bot_thread.start()
-print("🤖 Telegram Bot started in background thread")
-
 if __name__ == "__main__":
-    # Локальный запуск
-    print("🚀 Starting local server...")
-    run_flask()
+    print("=" * 60)
+    print("🚀 ЗАПУСК MEXC SCREENER")
+    print("=" * 60)
+    
+    # Запускаем бота в фоновом потоке
+    bot_thread = threading.Thread(target=start_bot, daemon=True)
+    bot_thread.start()
+    print("🤖 Telegram Bot starting...")
+    
+    # Flask в основном потоке (для локального запуска)
+    print("🌐 Flask server starting...")
+    port = int(os.environ.get('PORT', 10000))
+    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
