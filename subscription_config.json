@@ -1,0 +1,33 @@
+{
+  "admin_ids": [7167732063],
+  
+  "wallets": {
+    "TRC20": "TUuW5YBWKdhBvq7PD2rgFDDA79efmnu2L7",
+    "BEP20": "0x9dc57bd0550d2e32a60b8462789b9b7aedd267b4"
+  },
+  
+  "api_keys": {
+    "bscscan": "AI752D1YTPV4NXCMUE1S2DPKP5IG1WRIE6"
+  },
+  
+  "prices_usdt": {
+    "1_month": 10,
+    "3_months": 25,
+    "6_months": 45,
+    "1_year": 80
+  },
+  
+  "plan_names": {
+    "1_month": "1 месяц",
+    "3_months": "3 месяца",
+    "6_months": "6 месяцев",
+    "1_year": "1 год"
+  },
+  
+  "plan_days": {
+    "1_month": 30,
+    "3_months": 90,
+    "6_months": 180,
+    "1_year": 365
+  }
+}
