@@ -1355,7 +1355,7 @@ class MEXCFullScreener:
                 errors[0] += 1
                 return None
         
-        with ThreadPoolExecutor(max_workers=30) as ex:
+        with ThreadPoolExecutor(max_workers=10) as ex:
             for result in ex.map(analyze, all_symbols):
                 if result:
                     for signal in result:
@@ -3277,3 +3277,4 @@ if __name__ == "__main__":
     print("🌐 Flask server starting...")
     port = int(os.environ.get('PORT', 10000))
     flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
