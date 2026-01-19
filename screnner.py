@@ -3247,26 +3247,33 @@ class TelegramBot:
 
 
 # ═══════════════════════════════════════════════════════════════
-# ЗАПУСК БОТА + FLASK
+# ЗАПУСК (ИСПРАВЛЕННЫЙ ДЛЯ RENDER)
 # ═══════════════════════════════════════════════════════════════
 
-def start_bot():
-    """Запуск Telegram бота"""
-    time.sleep(2)  # Ждём запуска Flask
+def start_bot_thread():
+    # Задержка, чтобы дать Flask время инициализироваться
+    time.sleep(1)
+    print("🤖 Telegram Bot starting in background...")
     bot = TelegramBot()
     bot.run()
 
+# ЭТОТ КОД ЗАПУСТИТСЯ И ПРИ gunicorn, И ПРИ python screnner.py
+# Запускаем бота сразу при чтении файла
+try:
+    # Проверка, чтобы не запустить дважды при перезагрузках воркеров
+    if threading.active_count() < 20: 
+        bot_thread = threading.Thread(target=start_bot_thread, daemon=True)
+        bot_thread.start()
+        print("✅ Bot thread initiated")
+except Exception as e:
+    print(f"❌ Failed to start bot thread: {e}")
+
+# Этот блок работает только при локальном запуске (python screnner.py)
 if __name__ == "__main__":
     print("=" * 60)
-    print("🚀 ЗАПУСК MEXC SCREENER")
+    print("🚀 ЗАПУСК MEXC SCREENER (LOCAL)")
     print("=" * 60)
     
-    # Запускаем бота в фоновом потоке
-    bot_thread = threading.Thread(target=start_bot, daemon=True)
-    bot_thread.start()
-    print("🤖 Telegram Bot starting...")
-    
-    # Flask в основном потоке (для локального запуска)
     print("🌐 Flask server starting...")
     port = int(os.environ.get('PORT', 10000))
     flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
