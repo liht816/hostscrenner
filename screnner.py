@@ -1599,6 +1599,44 @@ class SubscriptionManager:
         self._save_subscriptions()
         return new_expires
     
+    def admin_grant_subscription(self, target_chat_id, days):
+        """Выдача подписки админом"""   # ← 8 пробелов
+        chat_id_str = str(target_chat_id)  # ← 8 пробелов
+        current_time = time.time()
+    
+        # Если уже есть активная подписка — продлеваем
+        if chat_id_str in self.subscriptions:
+            old_expires = self.subscriptions[chat_id_str].get('expires_at', 0)
+            if old_expires > current_time:
+                new_expires = old_expires + (days * 86400)
+            else:
+                new_expires = current_time + (days * 86400)
+        else:
+            new_expires = current_time + (days * 86400)
+    
+        self.subscriptions[chat_id_str] = {
+            'plan': f'admin_grant_{days}d',
+            'activated_at': current_time,
+            'expires_at': new_expires,
+            'granted_by_admin': True
+        }
+    
+        self._save_subscriptions()
+        return new_expires
+
+    def get_all_subscriptions_stats(self):
+        """Статистика всех подписок"""
+        current_time = time.time()
+        total = len(self.subscriptions)
+        active = sum(1 for s in self.subscriptions.values() 
+                    if s.get('expires_at', 0) > current_time)
+        expired = total - active
+    
+        return {
+            'total': total,
+            'active': active,
+            'expired': expired
+        }
     def get_prices(self):
         """Получение цен"""
         return self.config.get('prices_usdt', {})
@@ -1797,11 +1835,21 @@ class SubscriptionManager:
         
         return False, message
     
-    def format_expires_date(self, timestamp):
-        """Форматирование даты окончания"""
-        if timestamp is None:
-            return "∞ Навсегда"
-        return datetime.fromtimestamp(timestamp).strftime('%d.%m.%Y %H:%M')
+    def get_days_remaining(self, expires_at):
+        """Возвращает количество оставшихся дней подписки"""
+        if expires_at is None:
+            return 0
+        current_time = time.time()
+        if expires_at <= current_time:
+            return 0
+        remaining_seconds = expires_at - current_time
+        return int(remaining_seconds / 86400)  # 86400 = секунд в дне
+    
+    def format_expires_date(self, expires_at):
+        """Форматирует дату истечения"""
+        if expires_at is None:
+            return "N/A"
+        return datetime.fromtimestamp(expires_at).strftime('%d.%m.%Y %H:%M')
 
 class TelegramBot:
     def __init__(self):
@@ -1821,7 +1869,8 @@ class TelegramBot:
         self.last_menu_message = {}
         self.alert_creation_state = {}
         self.selected_alert_index = {}
-        
+        self.admin_grant_state = {}  # Для выдачи подписок админом
+
         self.lock = threading.Lock()
     
     def get_screener(self, chat_id):
@@ -1875,13 +1924,19 @@ class TelegramBot:
         except:
             return None
     
-    def get_main_keyboard(self):
-        return {"keyboard": [
+    def get_main_keyboard(self, chat_id=None):
+        keyboard = [
             [{"text": "🚀 Старт"}, {"text": "🛑 Стоп"}, {"text": "📊 Статус"}],
             [{"text": "🔥 ТОП"}, {"text": "📈 Аналитика"}],
             [{"text": "🎯 Price Alerts"}, {"text": "📋 Пары"}],
             [{"text": "⚙️ Настройки"}, {"text": "💎 Подписка"}]
-        ], "resize_keyboard": True}
+        ]
+    
+        # Добавляем кнопку админ-панели для админов
+        if chat_id and self.subscription_manager.is_admin(chat_id):
+            keyboard.append([{"text": "👑 Админ-панель"}])
+    
+        return {"keyboard": keyboard, "resize_keyboard": True}
     
     def get_top_mode_keyboard(self):
         return {"keyboard": [[{"text": "📈 ТОП Роста"}], [{"text": "📉 ТОП Падения"}], [{"text": "🔙 Главное меню"}]], "resize_keyboard": True}
@@ -2007,6 +2062,24 @@ class TelegramBot:
             [{"text": "🔙 Главное меню"}]
         ], "resize_keyboard": True}
     
+    def get_admin_panel_keyboard(self):
+        """Клавиатура админ-панели"""
+        return {"keyboard": [
+            [{"text": "🎁 Выдать подписку"}],
+            [{"text": "📊 Статистика подписок"}],
+            [{"text": "🔙 Главное меню"}]
+        ], "resize_keyboard": True}
+
+    def get_admin_days_keyboard(self):
+        """Выбор срока подписки для выдачи"""
+        return {"keyboard": [
+            [{"text": "📅 7 дней"}, {"text": "📅 14 дней"}],
+            [{"text": "📅 30 дней"}, {"text": "📅 90 дней"}],
+            [{"text": "📅 180 дней"}, {"text": "📅 365 дней"}],
+            [{"text": "✏️ Свой срок"}],
+            [{"text": "🔙 Отмена"}]
+        ], "resize_keyboard": True}
+
     def get_plan_keyboard(self):
         prices = self.subscription_manager.get_prices()
         return {"keyboard": [
@@ -2085,7 +2158,7 @@ class TelegramBot:
 📨 Сегодня сигналов: {today_signals}
 💾 Автосохранение: ✅ ВКЛ
 ━━━━━━━━━━━━━━━━━━━━━━━━"""
-        self.send_message(chat_id, msg, self.get_main_keyboard())
+        self.send_message(chat_id, msg, self.get_main_keyboard(chat_id))
     
     def show_settings(self, chat_id):
         s = self.get_screener(chat_id)
@@ -2179,7 +2252,7 @@ class TelegramBot:
 💱 Фильтр Quote: {quote_names[s.spot_quote_filter]}
 📌 Активных: {active}
 ━━━━━━━━━━━━━━━━━━━━━━━━"""
-        self.send_message(chat_id, msg, self.get_main_keyboard())
+        self.send_message(chat_id, msg, self.get_main_keyboard(chat_id))
     
     def save_and_confirm(self, chat_id, setting_name):
         s = self.get_screener(chat_id)
@@ -2238,15 +2311,175 @@ class TelegramBot:
 👑 Admin: {ADMIN_LINK}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
         self.send_message(chat_id, msg, self.get_no_subscription_keyboard())
-    
+
     def handle(self, message):
         chat_id = message['chat']['id']
         text = message.get('text', '').strip()
         
         s = self.get_screener(chat_id)
-        
+
+        # ═══════════════════════════════════════════════════════════════
+        # ADMIN PANEL HANDLERS
+        # ═══════════════════════════════════════════════════════════════
+
+        if text == "👑 Админ-панель":
+            if not self.subscription_manager.is_admin(chat_id):
+                self.send_message(chat_id, "❌ Доступ запрещён", self.get_main_keyboard(chat_id))
+                return
+            
+            stats = self.subscription_manager.get_all_subscriptions_stats()
+            msg = f"""👑 АДМИН-ПАНЕЛЬ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📊 Статистика подписок:
+├ Всего: {stats['total']}
+├ Активных: {stats['active']}
+└ Истёкших: {stats['expired']}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+            self.send_message(chat_id, msg, self.get_admin_panel_keyboard())
+
+        elif text == "🎁 Выдать подписку":
+            if not self.subscription_manager.is_admin(chat_id):
+                self.send_message(chat_id, "❌ Доступ запрещён", self.get_main_keyboard(chat_id))
+                return
+            
+            self.admin_grant_state[chat_id] = {'step': 'select_days'}
+            msg = """🎁 ВЫДАЧА ПОДПИСКИ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Выберите срок подписки:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+            self.send_message(chat_id, msg, self.get_admin_days_keyboard())
+
+        elif (text.startswith("📅 ") and "дней" in text) or (text.startswith("📅 ") and "дня" in text):
+            if chat_id in self.admin_grant_state and self.admin_grant_state[chat_id].get('step') == 'select_days':
+                try:
+                    days = int(text.replace("📅 ", "").replace(" дней", "").replace(" дня", "").strip())
+                    self.admin_grant_state[chat_id] = {'step': 'enter_user_id', 'days': days}
+                    msg = f"""🎁 ВЫДАЧА ПОДПИСКИ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📅 Срок: {days} дней
+
+📝 Введите Telegram ID пользователя:
+
+(Пользователь может узнать свой ID 
+у бота @userinfobot)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+                    self.send_message(chat_id, msg)
+                except:
+                    self.send_message(chat_id, "❌ Ошибка", self.get_admin_days_keyboard())
+
+        elif text == "✏️ Свой срок":
+            if chat_id in self.admin_grant_state:
+                self.admin_grant_state[chat_id] = {'step': 'enter_custom_days'}
+                self.send_message(chat_id, "📝 Введите количество дней (1-3650):")
+
+        elif text == "📊 Статистика подписок":
+            if not self.subscription_manager.is_admin(chat_id):
+                self.send_message(chat_id, "❌ Доступ запрещён", self.get_main_keyboard(chat_id))
+                return
+            
+            stats = self.subscription_manager.get_all_subscriptions_stats()
+            
+            # Получаем детали активных подписок
+            current_time = time.time()
+            active_subs = []
+            for uid, sub in self.subscription_manager.subscriptions.items():
+                if sub.get('expires_at', 0) > current_time:
+                    days_left = int((sub['expires_at'] - current_time) / 86400)
+                    active_subs.append(f"├ ID: {uid} — {days_left} дн.")
+            
+            details = "\n".join(active_subs[:20]) if active_subs else "├ Нет активных"
+            
+            msg = f"""📊 СТАТИСТИКА ПОДПИСОК
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📈 Общая статистика:
+├ Всего пользователей: {stats['total']}
+├ Активных подписок: {stats['active']}
+└ Истёкших: {stats['expired']}
+
+👥 Активные подписки:
+{details}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+            self.send_message(chat_id, msg, self.get_admin_panel_keyboard())
+
+        # ═══ ОБРАБОТКА ВВОДА АДМИНА ═══
+        elif chat_id in self.admin_grant_state:
+            state = self.admin_grant_state[chat_id]
+            
+            if text == "🔙 Отмена":
+                del self.admin_grant_state[chat_id]
+                self.send_message(chat_id, "❌ Отменено", self.get_admin_panel_keyboard())
+                return
+            
+            if state.get('step') == 'enter_custom_days':
+                try:
+                    days = int(text.strip())
+                    if 1 <= days <= 3650:
+                        self.admin_grant_state[chat_id] = {'step': 'enter_user_id', 'days': days}
+                        msg = f"""🎁 ВЫДАЧА ПОДПИСКИ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📅 Срок: {days} дней
+
+📝 Введите Telegram ID пользователя:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+                        self.send_message(chat_id, msg)
+                    else:
+                        self.send_message(chat_id, "❌ Введите число от 1 до 3650")
+                except:
+                    self.send_message(chat_id, "❌ Введите число")
+                return
+            
+            if state.get('step') == 'enter_user_id':
+                try:
+                    target_id = int(text.strip())
+                    days = state['days']
+                    
+                    # Выдаём подписку
+                    expires_at = self.subscription_manager.admin_grant_subscription(target_id, days)
+                    expires_str = self.subscription_manager.format_expires_date(expires_at)
+                    
+                    del self.admin_grant_state[chat_id]
+                    
+                    msg = f"""✅ ПОДПИСКА ВЫДАНА!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+👤 Пользователь: {target_id}
+📅 Срок: {days} дней
+📅 Действует до: {expires_str}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+                    self.send_message(chat_id, msg, self.get_admin_panel_keyboard())
+                    
+                    # Уведомляем пользователя
+                    try:
+                        user_msg = f"""🎉 ВАМ ВЫДАНА ПОДПИСКА!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📅 Срок: {days} дней
+📅 Действует до: {expires_str}
+
+Нажмите /start чтобы начать!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+                        self.send_message(target_id, user_msg, self.get_main_keyboard(target_id))
+                    except:
+                        pass  # Если пользователь не начал чат с ботом
+                    
+                except ValueError:
+                    self.send_message(chat_id, "❌ Неверный ID. Введите числовой Telegram ID:")
+                return
+
         # Обработка ввода
-        if chat_id in self.waiting_for_input:
+        elif chat_id in self.waiting_for_input:
             inp = self.waiting_for_input.pop(chat_id)
             
             if inp == 'enter_tx_hash':
@@ -2297,7 +2530,7 @@ class TelegramBot:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 👑 Приятного использования!
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
-                    self.send_message(chat_id, msg, self.get_main_keyboard())
+                    self.send_message(chat_id, msg, self.get_main_keyboard(chat_id))
                 else:
                     msg = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ❌ ОПЛАТА НЕ НАЙДЕНА
@@ -2401,7 +2634,7 @@ class TelegramBot:
                 return
         
         # Price Alert - ввод цены
-        if chat_id in self.alert_creation_state and self.alert_creation_state[chat_id].get('step') == 'price':
+        elif chat_id in self.alert_creation_state and self.alert_creation_state[chat_id].get('step') == 'price':
             if text == "🔙 Назад":
                 self.alert_creation_state[chat_id]['step'] = 'condition'
                 self.send_message(chat_id, "📊 Выберите условие:", self.get_alert_condition_keyboard())
@@ -2443,7 +2676,7 @@ class TelegramBot:
             return
         
         # Основные команды
-        if text in ['/start', '/help']:
+        elif text in ['/start', '/help']:
             msg = f"""👑 KING |PUMP/DUMP| SCREENER
 ━━━━━━━━━━━━━━━━━━━━━━━━
 🔮 Фьючерсы + 💱 Спот
@@ -2466,7 +2699,7 @@ class TelegramBot:
 📊 Графики с каждым сигналом
 ━━━━━━━━━━━━━━━━━━━━━━━━
 👑 Admin: {ADMIN_LINK}"""
-            self.send_message(chat_id, msg, self.get_main_keyboard())
+            self.send_message(chat_id, msg, self.get_main_keyboard(chat_id))
         
         elif text == "🚀 Старт":
             if not self.check_subscription(chat_id):
@@ -2490,15 +2723,15 @@ class TelegramBot:
 └ 📊 Графики: {"ВКЛ" if s.send_charts else "ВЫКЛ"}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━"""
-                self.send_message(chat_id, msg, self.get_main_keyboard())
+                self.send_message(chat_id, msg, self.get_main_keyboard(chat_id))
             else:
-                self.send_message(chat_id, "⚠️ Уже работает", self.get_main_keyboard())
+                self.send_message(chat_id, "⚠️ Уже работает", self.get_main_keyboard(chat_id))
         
         elif text == "🛑 Стоп":
             if self.stop_user_screener(chat_id):
-                self.send_message(chat_id, "🛑 Остановлен", self.get_main_keyboard())
+                self.send_message(chat_id, "🛑 Остановлен", self.get_main_keyboard(chat_id))
             else:
-                self.send_message(chat_id, "⚠️ Скринер не запущен", self.get_main_keyboard())
+                self.send_message(chat_id, "⚠️ Скринер не запущен", self.get_main_keyboard(chat_id))
         
         elif text == "📊 Статус":
             self.show_status(chat_id)
@@ -2546,7 +2779,7 @@ class TelegramBot:
                 return
             
             # Во всех остальных случаях - главное меню
-            self.send_message(chat_id, "🏠 Главное меню", self.get_main_keyboard())
+            self.send_message(chat_id, "🏠 Главное меню", self.get_main_keyboard(chat_id))
         
         elif text.startswith("⏱ ") and text[2:] in ["1m", "5m", "15m", "30m", "1h", "4h", "24h"]:
             if self.top_mode.get(chat_id):
@@ -2567,7 +2800,7 @@ class TelegramBot:
             self.top_mode[chat_id] = None
             if chat_id in self.alert_creation_state:
                 del self.alert_creation_state[chat_id]
-            self.send_message(chat_id, "🏠 Главное меню", self.get_main_keyboard())
+            self.send_message(chat_id, "🏠 Главное меню", self.get_main_keyboard(chat_id))
 
         # ═══════════════════════════════════════════════════════════════
         # SUBSCRIPTION HANDLERS
@@ -2655,7 +2888,6 @@ class TelegramBot:
             self.send_message(chat_id, msg, self.get_plan_keyboard())
         
         elif text.startswith("📅 1 месяц"):
-             
             self.subscription_manager.pending_payments[chat_id] = {'plan': '1_month'}
             prices = self.subscription_manager.get_prices()
             msg = f"""💳 ОПЛАТА: 1 МЕСЯЦ
@@ -2672,7 +2904,6 @@ class TelegramBot:
             self.send_message(chat_id, msg, self.get_network_keyboard())
         
         elif text.startswith("📅 3 месяца"):
-             
             self.subscription_manager.pending_payments[chat_id] = {'plan': '3_months'}
             prices = self.subscription_manager.get_prices()
             msg = f"""💳 ОПЛАТА: 3 МЕСЯЦА
@@ -2689,7 +2920,6 @@ class TelegramBot:
             self.send_message(chat_id, msg, self.get_network_keyboard())
         
         elif text.startswith("📅 6 месяцев"):
-             
             self.subscription_manager.pending_payments[chat_id] = {'plan': '6_months'}
             prices = self.subscription_manager.get_prices()
             msg = f"""💳 ОПЛАТА: 6 МЕСЯЦЕВ
@@ -2706,7 +2936,6 @@ class TelegramBot:
             self.send_message(chat_id, msg, self.get_network_keyboard())
         
         elif text.startswith("📅 1 год"):
-             
             self.subscription_manager.pending_payments[chat_id] = {'plan': '1_year'}
             prices = self.subscription_manager.get_prices()
             msg = f"""💳 ОПЛАТА: 1 ГОД
@@ -3277,4 +3506,3 @@ if __name__ == "__main__":
     print("🌐 Flask server starting...")
     port = int(os.environ.get('PORT', 10000))
     flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
